@@ -1,11 +1,9 @@
-from turtle import forward
 import torch
 from torch import nn, optim
 from torch.autograd import Variable
 import numpy as np
 import os
 import pypianoroll
-#np.set_printoptions(threshold=np.inf)
 
 
 def load_batch(genre, batch_size):
@@ -19,14 +17,17 @@ def load_batch(genre, batch_size):
                 if track.pianoroll.size == 0: # If track is empty, append None
                     tempbatch.append(None)
                 else:
-                    tempbatch.append(track.pianoroll)
-                    empty = np.zeros_like(track.pianoroll) # For replacing empty tracks later
+                    tempbatch.append(track.pianoroll[:, 20:104])
+                    empty = np.zeros_like(track.pianoroll[:, 20:104]) # For replacing empty tracks later
             for i in range(len(tempbatch)): # Replacing empty tracks with 0-arrays so all tracks have same shape
                 if tempbatch[i] is None:
                     tempbatch[i] = empty
-            songroll = np.array(tempbatch)
-            for i in range(songroll.shape[1]//96): # Split song up into 4 beat segments i.e. 1 bar 
-                batch.append(songroll[:, 96*i:96*(i+1), :])
+            tempbatch = np.array(tempbatch) # Convert batch to numpy array
+
+            # Concatenate all separate track vectors into a single vector
+            tempbatch = np.concatenate((tempbatch[0], tempbatch[1], tempbatch[2],tempbatch[3], tempbatch[4]), axis = 1)
+            for i in range(tempbatch.shape[0]//96): # Split song up into 4 beat segments i.e. 1 bar 
+                batch.append(np.array(tempbatch[96*i:96*(i+1), :]))
                 if len(batch) >= batch_size:
                     break
             print('loaded {} of {}'.format(len(batch), batch_size))
@@ -35,31 +36,30 @@ def load_batch(genre, batch_size):
     except FileNotFoundError:
         print('Error: no such genre as', genre)
         return
-    return batch
+    return np.array(batch)
+
 
 class VAE(nn.Module):
     def __init__(self, input_size, output_size, hidden_dim, latent_dim,
-    n_layers, n_tracks, drop_prob=0.2):
+    batch_first=True):
             super(VAE, self).__init__()
 
             #Define parameters
             self.input_size = input_size
-            self.output_size = output_size
             self.hidden_dim = hidden_dim
             self.latent_dim = latent_dim
-            self.n_layers = n_layers
-            self.n_tracks = n_tracks
-            self.drop_prob = drop_prob
 
             #Define layers
-            self.rnn = nn.GRU(input_size=self.input_size, 
-            hidden_size=self.hidden_dim, dropout=self.drop_prob)
-            self.fc1 = nn.Linear(input_size=self.hidden_dim*5,
-            output_size=self.latent_dim*2)
-            self.relu1= nn.ReLU()
-            self.fc2 = nn.Linear(input_size=self.latent_dim,
-            output_size=self.latent_dim)
-            self.relu2 = nn.ReLU()
+            self.encoder = nn.GRU(input_size=self.input_size, 
+            hidden_size=self.hidden_dim)
+            self.decoder = nn.GRU(input_size = self.input_size,
+            hidden_size=self.hidden_dim)
+            self.fc_mu = nn.Linear(in_features=self.hidden_dim,
+            out_features=self.latent_dim)
+            self.fc_var = nn.Linear(in_features=self.hidden_dim,
+            out_features=self.latent_dim)
+            self.fc_output = nn.Linear(in_features=self.latent_dim,
+            out_features=self.hidden_dim)
 
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5*logvar)
@@ -68,13 +68,16 @@ class VAE(nn.Module):
         return sample
         
     def forward(self, x):
-        x = [self.rnn(a) for a in x]
-        return x
+        _, x_encoded = self.encoder(x)
+        mu = self.fc_mu(x_encoded)
+        var = self.fc_var(x_encoded)
+        z = self.reparameterize(mu, var)
+        hidden = self.fc_output(z)
+        x_hat, _ = self.decoder(hidden)
+        return x_hat
 
-batch = load_batch('Jozz', 1024)
-
-
-    
-
-            
-
+batch = load_batch('Jazz', 64)
+input_tensor = torch.from_numpy(batch)
+input_tensor = input_tensor.type(torch.FloatTensor)
+vae = VAE(420, 420, 128, 128)
+print(vae.forward(input_tensor).shape)
