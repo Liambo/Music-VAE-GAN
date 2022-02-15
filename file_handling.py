@@ -1,11 +1,17 @@
-def load_dataset(genre, batch_size=64, low_note=20, high_note=104, train_split=0.9):
-    directory = os.getcwd() + '/Dataset/Genres/' + genre
-    dataset = []
-    batch = []
-    COUNT = 0 #MAKES LOADING QUICKER FOR TESTING, DELETE WHEN DONE
-    try:
+import numpy as np
+import os
+import pypianoroll
+import pretty_midi as pm
+
+def load_dataset(genre_dict, batch_size=64, low_note=20, high_note=104, train_split=0.9):
+    path = os.getcwd() + '/Dataset/Genres/'
+    train_set = []
+    test_set = []
+    for genre in genre_dict:
+        temp_set = []
+        batch = []
+        directory = path + genre
         for file in os.listdir(directory):
-            COUNT += 1
             pianoroll = pypianoroll.load(directory + '/' + file)
             songroll = []
             for track in pianoroll: # Loading tracks into a list
@@ -29,16 +35,14 @@ def load_dataset(genre, batch_size=64, low_note=20, high_note=104, train_split=0
             for i in range(songroll.shape[0]//96): # Split song up into 4 beat segments i.e. 1 bar 
                 batch.append(np.array(songroll[96*i:96*(i+1), :]))
                 if len(batch) >= batch_size:
-                    dataset.append(np.transpose(np.array(batch), (1, 0, 2))) # Transpose so batch is 2nd dimension
+                    temp_set.append((genre, np.transpose(np.array(batch), (1, 0, 2)))) # Transpose so batch is 2nd dimension
                     batch = []
-            if COUNT == 10:
-                break
-    except FileNotFoundError:
-        print('Error: no such genre as', genre)
-        return
-    split_point = int(len(dataset)*train_split)
-    print(split_point, 'batches in train set,', len(dataset) - split_point, 'batches in test set.')
-    return np.array(dataset[:split_point]), np.array(dataset[split_point:])
+        split_point = int(len(temp_set)*train_split)
+        train_set += temp_set[:split_point]
+        test_set += temp_set[split_point:]
+        print('finished loading {} genre: {} train batches, {} test batches'.format(genre, len(temp_set[:split_point]), len(temp_set[split_point:])))
+    print(len(train_set), 'batches in train set,', len(test_set), 'batches in test set.')
+    return train_set, test_set
 
 
 def convert_batch(batch, low_note=20, high_note=104, threshold=0.5): # Converts entire batch to 1 long song, or converts until stop token found.
@@ -87,3 +91,4 @@ def convert_pianoroll(pianoroll, tempo=120): # Converts a pianoroll in a list to
     song.instruments.append(bass)
     song.instruments.append(strings)
     return song
+
