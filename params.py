@@ -10,12 +10,16 @@ kl_beta = 1.0
 n_epochs = 50
 eval_every = 2
 measure_every = 5
+
 train_proportion = 0.9
-batch_size = 64
+batch_size = 512
 shuffle_train = False
 train_num_workers = 4
 shuffle_test = False
 test_num_workers = 4
+
+swap_training_every = 50
+vae_train_proportion = 0.5
 
 hidden_dims = 256
 latent_dims = 256
