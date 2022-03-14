@@ -29,16 +29,17 @@ def construct_dataset(low_note=19, high_note=97): # Does preprocessing and conve
             for i in range(len(songroll)): # Replacing empty tracks with 0-arrays so all tracks have same shape
                 if songroll[i] is None:
                     songroll[i] = empty
-            for track in songroll:
-                track[track>1] = 1 # Convert all 'on' notes to 1s, regardless of volume.
             songroll = np.array(songroll) # Convert batch to numpy array
+            songroll = songroll * 0.5 # Multiply all notes by a half
+            songroll += 64 # Add 64 to all notes, putting them in range 64-128
+            songroll[songroll<=64] = 0 # Set all '64' notes back to 0
             # Concatenate all separate track vectors into a single vector
             flags = np.zeros((songroll.shape[1], 2))
             songroll = np.concatenate((flags, songroll[0], songroll[1], songroll[2],songroll[3], songroll[4]), axis = 1)
             start = np.expand_dims(np.zeros(392), 0)
-            start[0][0] = 1
+            start[0][0] = 128
             end = np.expand_dims(np.zeros(392), 0)
-            end[0][1] = 1
+            end[0][1] = 128
             songroll = np.concatenate((start, songroll, end))
             for i in range(songroll.shape[0]//384): # Split song up into 16 beat segments i.e. 4 bars
                 temp_set.append(torch.tensor(songroll[384*i:384*(i+1), :], dtype=torch.float32))

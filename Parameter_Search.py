@@ -1,4 +1,3 @@
-from unicodedata import bidirectional
 import torch
 from torch import optim
 from torch.utils.data import DataLoader
@@ -30,8 +29,9 @@ def main():
                     f = open(os.getcwd() + '/experiment_log/' + fname, 'w')
                     writer = csv.writer(f)
                     writer.writerow(['iteration', 'avg_loss', 'avg_qn', 'load_time', 'train_time'])
-                    vae = VAE(INPUT_SIZE, hidden, latent, bidirectional, fc_layers).to(device)
-                    optimiser = Optimisation(vae, os.getcwd() + '/Model_Checkpoints/', optim.Adam(vae.parameters(), lr=learning_rate, weight_decay=weight_decay), kl_beta, GENRE_DICT, batch_size, device)
+                    vae = VAE(INPUT_SIZE, hidden, latent, bidirectional, fc_layers, device).to(device)
+                    optimiser = Optimisation(vae, os.getcwd() + '/Model_Checkpoints/', optim.Adam(vae.parameters(), lr=learning_rate, weight_decay=weight_decay),
+                                            kl_beta, GENRE_DICT, batch_size, vae_mse, device)
                     optimiser.train(train_loader, test_loader, writer, n_epochs, eval_every, measure_every)
 
 if __name__ == '__main__':

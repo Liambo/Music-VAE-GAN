@@ -115,7 +115,7 @@ class VAE(nn.Module):
         return output, mu, logvar
     
     def generate(self, x, latent_genre_vec): # Generate a piece in style of genre in latent_genre_vec
-        z = torch.cat((torch.randn((latent_genre_vec.shape[0], self.latent_dim-self.n_genres), device=self.device), latent_genre_vec))
+        z = torch.cat((torch.randn((latent_genre_vec.shape[0], self.latent_dim-self.n_genres), device=self.device), latent_genre_vec), dim=1)
         hidden = self.fc_latent[0](z) # Sample from latent space to get initial hidden state for decoder
         for i in range(self.fc_layers-1):
             hidden = self.fc_latent[i+1](hidden)
@@ -132,11 +132,11 @@ class VAE(nn.Module):
     def discriminate(self, x):
         hidden = torch.zeros((x.shape[0], self.hidden_dim), device=self.device) # Initialise hidden state as zeroes
         for i in range(x.shape[1]): # For i in range(len of piece)
-            hidden = self.discriminator(x[:, i].squeeze(), hidden) # Update hidden state for every timestep
+            hidden = self.discriminator(x[:, i, :].squeeze(), hidden) # Update hidden state for every timestep
         if self.bidirectional:
             back_hidden = torch.zeros((x.shape[0], self.hidden_dim), device=self.device)
             for i in range(x.shape[1]-1, -1, -1):
-                back_hidden = self.back_discriminator(x[:, i].squeeze(), back_hidden)
+                back_hidden = self.back_discriminator(x[:, i, :].squeeze(), back_hidden)
             hidden = torch.cat((hidden, back_hidden), dim=1)
         hidden = self.fc_discriminator[0](hidden)
         for i in range(self.fc_layers-1):
@@ -145,24 +145,33 @@ class VAE(nn.Module):
 
 
 class Optimisation:
-    def __init__(self, model, checkpoint_path, optimiser, beta, genre_dict, batch_size, device):
+    def __init__(self, model, checkpoint_path, optimiser, beta, genre_dict, batch_size, vae_mse, device):
         self.device=device
         self.model = model
         self.optimiser = optimiser
         self.checkpoint_path = checkpoint_path
         self.train_losses = []
         self.val_losses = []
+        self.vae_mse = vae_mse
         self.mse = nn.MSELoss().to(self.device)
+        self.bce = nn.BCELoss().to(self.device)
         self.beta = beta
         self.batch_size = batch_size
         self.genre_dict = genre_dict
         self.n_genres = len(genre_dict)
 
-    def loss_fn(self, x, x_hat, mu, logvar):
-        mse_loss = self.mse(x[:,:,:-self.n_genres], x_hat) # reconstruction loss between input & output, i.e. how similar are they
+    def vae_loss_fn(self, x, x_hat, mu, logvar):
+        if self.vae_mse == True:
+            loss = self.mse(x[:,:,:-self.n_genres], x_hat) # reconstruction loss between input & output, i.e. how similar are they
+        else:
+            loss = self.bce(x_hat, x[:,:,:-self.n_genres])
         kl_div = (0.5 * (mu ** 2 + torch.exp(logvar) - logvar - 1).sum(axis=1)).mean()
         # KL Div loss, i.e. how similar is prior to posterior distribution. We sum loss over latent variables for each batch & timestep, then mean.
-        return mse_loss + self.beta * kl_div
+        return loss + self.beta * kl_div
+    
+    def gan_loss_fn(self, x, x_hat):
+        bce_loss = self.bce(x_hat, x)
+        return bce_loss
     
     def measure_qn(self, x): # Measure 'qualified notes', i.e. notes longer than 3 timesteps
         pointer_tensor = torch.zeros((x.shape[0], x.shape[2]), device=self.device) # Pointer tensor keeps track of length of currently on notes
@@ -173,13 +182,13 @@ class Optimisation:
                 current_slice = x[:, i, :].squeeze()
             else:
                 current_slice = torch.zeros_like(current_slice)
-            pointer_tensor += (current_slice >= 0.5)
-            qn = (((current_slice < 0.5) * pointer_tensor) >= 3).sum()
+            pointer_tensor += (current_slice > 64)
+            qn = (((current_slice <= 64) * pointer_tensor) >= 3).sum()
             qn_num += qn
-            uqn_num += ((((current_slice < 0.5) * pointer_tensor) > 0)).sum() - qn
-            pointer_tensor *= (current_slice >= 0.5)
-            # Note is considered on if value is above 0.5, so (current_slice >= 0.5) will return a tensor of 0's and 1's, where 1 denotes a note that is on.
-            # If current note is off, 'current_slice < 0.5' = True, so multiply by pointer_tensor to get currently ending notes & their lengths.
+            uqn_num += ((((current_slice <= 64) * pointer_tensor) > 0)).sum() - qn
+            pointer_tensor *= (current_slice > 64)
+            # Note is considered on if value is above 64, so (current_slice > 64) will return a tensor of 0's and 1's, where 1 denotes a note that is on.
+            # If current note is off, 'current_slice <= 64' = True, so multiply by pointer_tensor to get currently ending notes & their lengths.
             # If lengths are 3 or longer, that is a qualified note, so add to total qualified notes. If 1 or 2, it's unqualified, so add to total unqualified.
             # Multiply pointer by current notes at end so any finished notes get lengths set back to 0.
         return qn_num, uqn_num
@@ -197,14 +206,19 @@ class Optimisation:
                 current_slice[:, 4*n_notes + j*12:min(4*n_notes+(j+1)*12, 5*n_notes)]))
         return [(pc_tracker[:, i*12:(i+1)*12] > 0).sum(1) for i in range(5)]
 
-    def train_step(self, x, latent_genre_vec, vae=True, qn=True, upc=False):
+    def train_step(self, x, latent_genre_vec, vae=False, qn=True, upc=False):
         self.optimiser.zero_grad()
         self.model.train()
         if vae:
             x_hat, mu, logvar = self.model.transfer(x, latent_genre_vec)
-            loss = self.loss_fn(x, x_hat, mu, logvar)
+            loss = self.vae_loss_fn(x, x_hat, mu, logvar)
         else:
-            fake = self.model.generate(x, latent_genre_vec)
+            x_hat = self.model.generate(x, latent_genre_vec)
+            fake_pred = self.model.discriminate(x_hat)
+            fake_class = torch.ones_like(fake_pred)
+            real_pred = self.model.discriminate(x[:, :, :-self.n_genres])
+            real_class = torch.ones_like(real_pred)
+            loss = self.gan_loss_fn(torch.cat((fake_pred, real_pred)), torch.cat((fake_class, real_class)))
         loss.backward()
         self.optimiser.step()
         if qn:
@@ -217,10 +231,10 @@ class Optimisation:
     
     def test_step(self, x, latent_genre_vec):
         x_hat, mu, logvar = self.model.transfer(x, latent_genre_vec)
-        loss = self.loss_fn(x, x_hat, mu, logvar)
+        loss = self.vae_loss_fn(x, x_hat, mu, logvar)
         return loss.item()
     
-    def train(self, train_loader, test_loader, writer, n_epochs, eval_every, measure_every):
+    def train(self, train_loader, test_loader, writer, n_epochs, eval_every, measure_every, cycle_every, vae_train_proportion):
         genre_vec_dict = {} # Dictionary to hold genre vectors for different genres
         latent_genre_vec_dict = {} # Dictionary to hold latent genre vectors for different genres
         for genre in self.genre_dict:
@@ -242,7 +256,7 @@ class Optimisation:
                 ld += tm1 - tm2
                 input = torch.cat((batch, torch.stack([genre_vec_dict[gen] for gen in genre])), axis=2).to(self.device)
                 # Constructs input by concatenating genre vector to end of every input vector & converting entire matrix to float32 for compatability.
-                loss, qn, _ = self.train_step(input, torch.stack([latent_genre_vec_dict[gen] for gen in genre]).to(self.device))
+                loss, qn, _ = self.train_step(input, torch.stack([latent_genre_vec_dict[gen] for gen in genre]).to(self.device), vae=vae)
                 running_loss += loss
                 running_qn += qn
                 tm2 = tm1
@@ -267,8 +281,12 @@ class Optimisation:
                     eval_losses.append(loss)
                 print('mean loss for epoch ' + str(epoch) + ': ' + str(mean(eval_losses)))
                 torch.save({'epoch': epoch, 'model_state_dict': self.model.state_dict(), 'optimiser_state_dict': self.optimiser.state_dict(), 'loss': mean(eval_losses)}, self.checkpoint_path + str(datetime.datetime.now()) + '.pt')
+            if epoch % cycle_every > cycle_every * vae_train_proportion:
+                vae = False
+            else:
+                vae = True
 
-    def lr_range_test(self, train_loader, writer, start_lr=-5.0, stop_lr=0.0, lr_step=0.5):
+    def lr_range_test(self, train_loader, writer, start_lr=-5.0, stop_lr=0.0, lr_step=0.5, measure_every=10, change_every=500):
         genre_vec_dict = {} # Dictionary to hold genre vectors for different genres
         latent_genre_vec_dict = {} # Dictionary to hold latent genre vectors for different genres
         for genre in self.genre_dict:
@@ -288,12 +306,10 @@ class Optimisation:
                 loss = self.train_step(input, latent_genre_vec)
                 running_loss += loss
                 i += 1
-                if i % 10 == 0:
-                    writer.add_scalar('lr test loss',
-                                    running_loss / 10,
-                                    i)
+                if i % measure_every == 0:
+                    writer.writerow([i, lr, running_loss / measure_every])
                     running_loss = 0.0
-                if i % 500 == 0:
+                if i % change_every == 0:
                     print('done test for lr ' + str(lr))
                     if start_lr >= stop_lr:
                         return

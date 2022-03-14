@@ -10,7 +10,7 @@ import csv
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    f = open(os.getcwd() + '/experiment_log/' + datetime.datetime.now() + '.csv', 'w')
+    f = open(os.getcwd() + '/experiment_log/' + str(datetime.datetime.now()) + '.csv', 'w')
     writer = csv.writer(f)
 
     train_idlist = [*range(0, int(N_SAMPLES * train_proportion))]
@@ -21,7 +21,8 @@ def main():
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=shuffle_test, num_workers=test_num_workers)
 
     vae = VAE(INPUT_SIZE, hidden_dims, latent_dims, bidirectional, fc_layers, device).to(device)
-    optimiser = Optimisation(vae, os.getcwd() + '/Model_Checkpoints/', optim.Adam(vae.parameters(), lr=learning_rate, weight_decay=weight_decay), kl_beta, GENRE_DICT, batch_size, device)
+    optimiser = Optimisation(vae, os.getcwd() + '/Model_Checkpoints/', optim.Adam(vae.parameters(), lr=learning_rate, weight_decay=weight_decay),
+                            kl_beta, GENRE_DICT, batch_size, vae_mse, device)
 
     optimiser.train(train_loader, test_loader, writer, n_epochs, eval_every, measure_every)
 
