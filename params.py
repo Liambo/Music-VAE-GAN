@@ -18,7 +18,7 @@ train_num_workers = 4
 shuffle_test = False
 test_num_workers = 4
 
-swap_training_every = 50
+cycle_training_every = 50
 vae_train_proportion = 0.5
 vae_mse = True
 
@@ -26,3 +26,4 @@ hidden_dims = 256
 latent_dims = 256
 bidirectional = True
 fc_layers = 2
+gru_layers = 3

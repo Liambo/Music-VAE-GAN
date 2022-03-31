@@ -20,11 +20,11 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle_train, num_workers=train_num_workers)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=shuffle_test, num_workers=test_num_workers)
 
-    vae = VAE(INPUT_SIZE, hidden_dims, latent_dims, bidirectional, fc_layers, device).to(device)
+    vae = VAE(INPUT_SIZE, hidden_dims, latent_dims, gru_layers, bidirectional, fc_layers, device).to(device)
     optimiser = Optimisation(vae, os.getcwd() + '/Model_Checkpoints/', optim.Adam(vae.parameters(), lr=learning_rate, weight_decay=weight_decay),
                             kl_beta, GENRE_DICT, batch_size, vae_mse, device)
 
-    optimiser.train(train_loader, test_loader, writer, n_epochs, eval_every, measure_every)
+    optimiser.train(train_loader, test_loader, writer, n_epochs, eval_every, measure_every, cycle_training_every, vae_train_proportion)
 
 if __name__ == '__main__':
     torch.multiprocessing.set_start_method('forkserver')

@@ -4,10 +4,11 @@ from torch import nn
 import numpy as np
 import datetime
 import time
+import math
 
 
 class VAE(nn.Module):
-    def __init__(self, input_size, hidden_dim, latent_dim,
+    def __init__(self, input_size, hidden_dim, latent_dim, gru_layers,
                     bidirectional, fc_layers, device, n_genres=5):
             super(VAE, self).__init__()
 
@@ -15,6 +16,7 @@ class VAE(nn.Module):
             self.input_size = input_size
             self.hidden_dim = hidden_dim
             self.latent_dim = latent_dim
+            self.gru_layers = gru_layers
             self.bidirectional = bidirectional
             self.fc_layers = fc_layers
             self.n_genres = n_genres
@@ -23,61 +25,88 @@ class VAE(nn.Module):
                 self.encoder_hidden_dim = 2*hidden_dim
             else:
                 self.encoder_hidden_dim = hidden_dim
+
             #Define layers
-            self.encoder = nn.GRUCell(input_size=self.input_size+self.n_genres, # Genre vector is concatenated to input to encoder, hence input_size + n_genres
-            hidden_size=self.hidden_dim)
+            self.encoder = nn.ModuleList([nn.GRUCell(input_size=self.input_size+self.n_genres, # Genre vector is concatenated to input to encoder, hence input_size + n_genres
+                hidden_size=self.hidden_dim)])
+            for i in range(self.gru_layers-1):
+                self.encoder.append(nn.GRUCell(input_size=self.hidden_dim, hidden_size=self.hidden_dim))
+            self.discriminator = nn.ModuleList([nn.GRUCell(input_size=self.input_size,
+            hidden_size=self.hidden_dim)])
+            for i in range(self.gru_layers-1):
+                self.discriminator.append(nn.GRUCell(input_size=self.hidden_dim, hidden_size=self.hidden_dim))
+
             if bidirectional:
-                self.back_encoder = nn.GRUCell(input_size=self.input_size+self.n_genres, 
-                hidden_size=self.hidden_dim)
-                self.back_discriminator = nn.GRUCell(input_size=self.input_size, 
-                hidden_size=self.hidden_dim)
-            self.decoder = nn.GRUCell(input_size=self.input_size,
-            hidden_size=self.hidden_dim)
-            self.discriminator = nn.GRUCell(input_size=self.input_size,
-            hidden_size=self.hidden_dim)
-            self.fc_mu = nn.ModuleList([])
-            self.fc_logvar = nn.ModuleList([])
-            self.fc_latent = nn.ModuleList([])
-            self.fc_decoder = nn.ModuleList([])
-            self.fc_discriminator = nn.ModuleList([])
+                self.back_encoder = nn.ModuleList([nn.GRUCell(input_size=self.input_size+self.n_genres, 
+                hidden_size=self.hidden_dim)])
+                for i in range(self.gru_layers-1):
+                    self.back_encoder.append(nn.GRUCell(input_size=self.hidden_dim, hidden_size=self.hidden_dim))
+                self.back_discriminator = nn.ModuleList([nn.GRUCell(input_size=self.input_size, 
+                hidden_size=self.hidden_dim)])
+                for i in range(self.gru_layers-1):
+                    self.back_discriminator.append(nn.GRUCell(input_size=self.hidden_dim, hidden_size=self.hidden_dim))
 
-            for _ in range(fc_layers-1):
-                self.fc_mu.append(nn.Sequential(
+            self.decoder = nn.ModuleList([nn.GRUCell(input_size=self.input_size,
+            hidden_size=self.hidden_dim)])
+            for i in range(self.gru_layers-1):
+                self.decoder.append(nn.GRUCell(input_size=self.hidden_dim, hidden_size=self.hidden_dim))
+
+            self.fc_mu = nn.Sequential()
+            self.fc_logvar = nn.Sequential()
+            self.fc_latent = nn.Sequential()
+            self.fc_decoder = nn.Sequential()
+            self.fc_discriminator = nn.Sequential()
+
+            for i in range(self.fc_layers-1):
+                self.fc_mu.add_module('Linear_' + str(i),
                     nn.Linear(in_features=self.encoder_hidden_dim,
-                    out_features=self.encoder_hidden_dim),
-                    nn.LeakyReLU()
-                ))
-                self.fc_logvar.append(nn.Sequential(
+                    out_features=self.encoder_hidden_dim))
+                self.fc_mu.add_module('ReLU_' + str(i),
+                    nn.LeakyReLU())
+
+                self.fc_logvar.add_module('Linear_' + str(i),
                     nn.Linear(in_features=self.encoder_hidden_dim,
-                    out_features=self.encoder_hidden_dim),
-                    nn.LeakyReLU()
-                ))
-                self.fc_latent.append(nn.Sequential(
+                    out_features=self.encoder_hidden_dim))
+                self.fc_logvar.add_module('ReLU_' + str(i),
+                    nn.LeakyReLU())
+
+                self.fc_latent.add_module('Linear_' + str(i),
                     nn.Linear(in_features=self.latent_dim,
-                    out_features=self.latent_dim),
-                    nn.LeakyReLU()
-                ))
-                self.fc_decoder.append(nn.Sequential(
+                    out_features=self.latent_dim))
+                self.fc_latent.add_module('ReLU_' + str(i),
+                    nn.LeakyReLU())
+                
+                self.fc_decoder.add_module('Linear_' + str(i),
                     nn.Linear(in_features=self.hidden_dim,
-                    out_features=self.hidden_dim),
-                    nn.LeakyReLU()
-                ))
-                self.fc_discriminator.append(nn.Sequential(
-                    nn.Linear(in_features=self.encoder_hidden_dim,
-                    out_features=self.encoder_hidden_dim),
-                    nn.LeakyReLU()
-                ))
+                    out_features=self.hidden_dim))
+                self.fc_decoder.add_module('ReLU_' + str(i),
+                    nn.LeakyReLU())
 
-            self.fc_mu.append(nn.Linear(in_features=self.encoder_hidden_dim,
-            out_features=self.latent_dim-self.n_genres))
-            self.fc_logvar.append(nn.Linear(in_features=self.encoder_hidden_dim,
-            out_features=self.latent_dim-self.n_genres))
-            self.fc_latent.append(nn.Linear(in_features=self.latent_dim,
-            out_features=self.hidden_dim))
-            self.fc_decoder.append(nn.Linear(in_features=self.hidden_dim,
-            out_features=self.input_size))
-            self.fc_discriminator.append(nn.Sequential(
-                nn.Linear(in_features=self.encoder_hidden_dim, out_features=1), nn.Sigmoid()))
+                self.fc_discriminator.add_module('Linear_' + str(i),
+                    nn.Linear(in_features=self.encoder_hidden_dim,
+                    out_features=self.encoder_hidden_dim))
+                self.fc_discriminator.add_module('ReLU_' + str(i),
+                    nn.LeakyReLU())
+
+            self.fc_mu.add_module('Linear_' + str(self.fc_layers-1),
+                nn.Linear(in_features=self.encoder_hidden_dim,
+                out_features=self.latent_dim-self.n_genres))
+
+            self.fc_logvar.add_module('Linear_' + str(self.fc_layers-1),
+                nn.Linear(in_features=self.encoder_hidden_dim,
+                out_features=self.latent_dim-self.n_genres))
+
+            self.fc_latent.add_module('Linear_' + str(self.fc_layers-1),
+                nn.Linear(in_features=self.latent_dim,
+                out_features=self.hidden_dim))
+
+            self.fc_decoder.add_module('Linear_' + str(self.fc_layers-1),
+                nn.Linear(in_features=self.hidden_dim,
+                out_features=self.input_size))
+
+            self.fc_discriminator.add_module('Linear_' + str(self.fc_layers-1),
+                nn.Linear(in_features=self.encoder_hidden_dim, out_features=1))
+            self.fc_discriminator.add_module('Sigmoid', nn.Sigmoid())
 
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5*logvar)
@@ -86,61 +115,78 @@ class VAE(nn.Module):
         return sample
         
     def transfer(self, x, latent_genre_vec): # Transfer x to target genre in latent_genre_vec
-        hidden = torch.zeros((x.shape[0], self.hidden_dim), device=self.device) # Initialise hidden state as zeroes
+        hidden_states = [torch.zeros((x.shape[0], self.hidden_dim), device=self.device) for i in range(self.gru_layers)] # Initialise hidden state as zeroes
         for i in range(x.shape[1]): # For i in range(len of piece)
-            hidden = self.encoder(x[:, i].squeeze(), hidden) # Update hidden state for every timestep
+            hidden_states[0] = self.encoder[0](x[:, i].squeeze(), hidden_states[0]) # Update hidden state for every timestep
+            for j in range(1, self.gru_layers): # Passing hidden states through all GRU layers
+                hidden_states[j] = self.encoder[j](hidden_states[j-1], hidden_states[j])
+        hidden = hidden_states[self.gru_layers-1]
+
         if self.bidirectional:
-            back_hidden = torch.zeros((x.shape[0], self.hidden_dim), device=self.device)
+            back_hidden = [torch.zeros((x.shape[0], self.hidden_dim), device=self.device) for i in range(self.gru_layers)]
             for i in range(x.shape[1]-1, -1, -1):
-                back_hidden = self.back_encoder(x[:, i].squeeze(), back_hidden)
-            hidden = torch.cat((hidden, back_hidden), dim=1)
-        mu = self.fc_mu[0](hidden) # Get latent mean from final hidden state
-        logvar = self.fc_logvar[0](hidden) # Get latent logvar from final hidden state
-        for i in range(self.fc_layers-1):
-            mu = self.fc_mu[i+1](mu)
-            logvar = self.fc_logvar[i+1](logvar)
+                back_hidden[0] = self.back_encoder[0](x[:, i].squeeze(), back_hidden[0])
+                for j in range(1, self.gru_layers):
+                    back_hidden[j] = self.back_encoder[j](back_hidden[j-1], back_hidden[j])
+            hidden = torch.cat((hidden, back_hidden[self.gru_layers-1]), dim=1)
+
+        mu = self.fc_mu(hidden) # Get latent mean from final hidden state
+        logvar = self.fc_logvar(hidden) # Get latent logvar from final hidden state
         z = self.reparameterize(mu, logvar) # Reparamaterize & sample from latent space
         z = torch.cat((z, latent_genre_vec), axis=1)
-        hidden = self.fc_latent[0](z) # Sample from latent space to get initial hidden state for decoder
-        for i in range(self.fc_layers-1):
-            hidden = self.fc_latent[i+1](hidden)
+        hidden_states = [self.fc_latent(z) for i in range(self.gru_layers)] # Sample from latent space to get initial hidden state for decoder
+        
         output_note = x[:, :1, :self.input_size].squeeze() # Start from first note of input (so not starting from empty note)
         output = x[:, :1, :self.input_size] # We only take up to input_size as genre info not concatenated to output.
         for i in range(x.shape[1]-1):
-            hidden = self.decoder(output_note, hidden)
-            output_note = self.fc_decoder[0](hidden)
-            for i in range(self.fc_layers-1):
-                output_note = self.fc_decoder[i+1](hidden)
+            hidden_states[0] = self.decoder[0](output_note, hidden_states[0])
+            for j in range(1, self.gru_layers):
+                hidden_states[j] = self.decoder[j](hidden_states[j-1], hidden_states[j])
+            output_note = self.fc_decoder(hidden_states[self.gru_layers-1])
             output = torch.cat((output, torch.unsqueeze(output_note, 1)), 1)
         return output, mu, logvar
     
+    def sample(self):
+        z = torch.randn((128, self.latent_dim), device=self.device)
+        hidden_states = [self.fc_latent(z) for i in range(self.gru_layers)] # Sample from latent space to get initial hidden state for decoder
+        output_note = torch.cat((torch.ones(128, 1), torch.zeros(128, self.input_size-1)), dim=1) # Start from first note of input (so not starting from empty note)
+        output = torch.unsqueeze(output_note, 1)
+        for i in range(96):
+            hidden_states[0] = self.decoder[0](output_note, hidden_states[0])
+            for j in range(1, self.gru_layers):
+                hidden_states[j] = self.decoder[j](hidden_states[j-1], hidden_states[j])
+            output_note = self.fc_decoder(hidden_states[self.gru_layers-1])
+            output = torch.cat((output, torch.unsqueeze(output_note, 1)), 1)
+        return output
+    
     def generate(self, x, latent_genre_vec): # Generate a piece in style of genre in latent_genre_vec
         z = torch.cat((torch.randn((latent_genre_vec.shape[0], self.latent_dim-self.n_genres), device=self.device), latent_genre_vec), dim=1)
-        hidden = self.fc_latent[0](z) # Sample from latent space to get initial hidden state for decoder
-        for i in range(self.fc_layers-1):
-            hidden = self.fc_latent[i+1](hidden)
+        hidden_states = [self.fc_latent(z) for i in range(self.gru_layers)] # Sample from latent space to get initial hidden state for decoder
         output_note = x[:, :1, :self.input_size].squeeze() # Start from first note of input (so not starting from empty note)
         output = x[:, :1, :self.input_size]
         for i in range(x.shape[1]-1):
-            hidden = self.decoder(output_note, hidden)
-            output_note = self.fc_decoder[0](hidden)
-            for i in range(self.fc_layers-1):
-                output_note = self.fc_decoder[i+1](hidden)
+            hidden_states[0] = self.decoder[0](output_note, hidden_states[0])
+            for j in range(1, self.gru_layers):
+                hidden_states[j] = self.decoder[j](hidden_states[j-1], hidden_states[j])
+            output_note = self.fc_decoder(hidden_states[self.gru_layers-1])
             output = torch.cat((output, torch.unsqueeze(output_note, 1)), 1)
         return output
     
     def discriminate(self, x):
-        hidden = torch.zeros((x.shape[0], self.hidden_dim), device=self.device) # Initialise hidden state as zeroes
+        hidden_states = [torch.zeros((x.shape[0], self.hidden_dim), device=self.device) for i in range(self.gru_layers)] # Initialise hidden state as zeroes
         for i in range(x.shape[1]): # For i in range(len of piece)
-            hidden = self.discriminator(x[:, i, :].squeeze(), hidden) # Update hidden state for every timestep
+            hidden_states[0] = self.discriminator[0](x[:, i, :].squeeze(), hidden_states[0]) # Update hidden state for every timestep
+            for j in range(1, self.gru_layers):
+                hidden_states[j] = self.discriminator[j](hidden_states[j-1], hidden_states[j])
+        hidden = hidden_states[self.gru_layers-1]
         if self.bidirectional:
-            back_hidden = torch.zeros((x.shape[0], self.hidden_dim), device=self.device)
+            back_hidden = [torch.zeros((x.shape[0], self.hidden_dim), device=self.device) for i in range(self.gru_layers)]
             for i in range(x.shape[1]-1, -1, -1):
-                back_hidden = self.back_discriminator(x[:, i, :].squeeze(), back_hidden)
-            hidden = torch.cat((hidden, back_hidden), dim=1)
-        hidden = self.fc_discriminator[0](hidden)
-        for i in range(self.fc_layers-1):
-            hidden = self.fc_discriminator[i+1](hidden)
+                back_hidden[0] = self.back_discriminator[0](x[:, i, :].squeeze(), back_hidden[0])
+                for j in range(1, self.gru_layers):
+                    back_hidden[j] = self.back_discriminator[j](back_hidden[j-1], back_hidden[j])
+            hidden = torch.cat((hidden, back_hidden[self.gru_layers-1]), dim=1)
+        hidden = self.fc_discriminator(hidden)
         return hidden
 
 
@@ -206,7 +252,7 @@ class Optimisation:
                 current_slice[:, 4*n_notes + j*12:min(4*n_notes+(j+1)*12, 5*n_notes)]))
         return [(pc_tracker[:, i*12:(i+1)*12] > 0).sum(1) for i in range(5)]
 
-    def train_step(self, x, latent_genre_vec, vae=False, qn=True, upc=False):
+    def train_step(self, x, latent_genre_vec, vae, qn=True, upc=False):
         self.optimiser.zero_grad()
         self.model.train()
         if vae:
@@ -217,7 +263,7 @@ class Optimisation:
             fake_pred = self.model.discriminate(x_hat)
             fake_class = torch.ones_like(fake_pred)
             real_pred = self.model.discriminate(x[:, :, :-self.n_genres])
-            real_class = torch.ones_like(real_pred)
+            real_class = torch.zeros_like(real_pred)
             loss = self.gan_loss_fn(torch.cat((fake_pred, real_pred)), torch.cat((fake_class, real_class)))
         loss.backward()
         self.optimiser.step()
@@ -248,6 +294,7 @@ class Optimisation:
         tm2 = time.time()
         ld = 0
         trn = 0
+        vae = int(math.ceil(vae_train_proportion))
         for epoch in range(1, n_epochs+1):
             i=0
             for batch, genre in train_loader:
@@ -281,12 +328,12 @@ class Optimisation:
                     eval_losses.append(loss)
                 print('mean loss for epoch ' + str(epoch) + ': ' + str(mean(eval_losses)))
                 torch.save({'epoch': epoch, 'model_state_dict': self.model.state_dict(), 'optimiser_state_dict': self.optimiser.state_dict(), 'loss': mean(eval_losses)}, self.checkpoint_path + str(datetime.datetime.now()) + '.pt')
-            if epoch % cycle_every > cycle_every * vae_train_proportion:
+            if epoch % cycle_every >= cycle_every * vae_train_proportion:
                 vae = False
             else:
                 vae = True
 
-    def lr_range_test(self, train_loader, writer, start_lr=-5.0, stop_lr=0.0, lr_step=0.5, measure_every=10, change_every=500):
+    def lr_range_test(self, train_loader, writer, vae, start_lr=-5.0, stop_lr=0.0, lr_step=0.5, measure_every=10, change_every=500):
         genre_vec_dict = {} # Dictionary to hold genre vectors for different genres
         latent_genre_vec_dict = {} # Dictionary to hold latent genre vectors for different genres
         for genre in self.genre_dict:
@@ -303,7 +350,7 @@ class Optimisation:
             for batch, genre in train_loader:
                 input = torch.cat((batch, torch.stack([genre_vec_dict[gen] for gen in genre])), axis=2).to(self.device)
                 latent_genre_vec = torch.stack([latent_genre_vec_dict[gen] for gen in genre]).to(self.device)
-                loss = self.train_step(input, latent_genre_vec)
+                loss, _, _ = self.train_step(input, latent_genre_vec, vae)
                 running_loss += loss
                 i += 1
                 if i % measure_every == 0:

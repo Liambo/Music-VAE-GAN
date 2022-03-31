@@ -29,10 +29,10 @@ def main():
                     f = open(os.getcwd() + '/experiment_log/' + fname, 'w')
                     writer = csv.writer(f)
                     writer.writerow(['iteration', 'avg_loss', 'avg_qn', 'load_time', 'train_time'])
-                    vae = VAE(INPUT_SIZE, hidden, latent, bidirectional, fc_layers, device).to(device)
+                    vae = VAE(INPUT_SIZE, hidden, latent, gru_layers, bidirectional, fc_layers, device).to(device)
                     optimiser = Optimisation(vae, os.getcwd() + '/Model_Checkpoints/', optim.Adam(vae.parameters(), lr=learning_rate, weight_decay=weight_decay),
                                             kl_beta, GENRE_DICT, batch_size, vae_mse, device)
-                    optimiser.train(train_loader, test_loader, writer, n_epochs, eval_every, measure_every)
+                    optimiser.train(train_loader, test_loader, writer, n_epochs, eval_every, measure_every, cycle_training_every, vae_train_proportion)
 
 if __name__ == '__main__':
     torch.multiprocessing.set_start_method('forkserver')
