@@ -5,6 +5,8 @@ INPUT_SIZE = 392
 
 # Parameters - Can edit these
 learning_rate = 10**-2.875
+disc_learning_rate = 10**-2.875
+disc_weight_decay = 0.000001
 weight_decay = 0.000001
 kl_beta = 1.0
 classifier_weight = 1.0
@@ -13,11 +15,11 @@ eval_every = 2
 measure_every = 5
 
 train_proportion = 0.9
-batch_size = 512
+batch_size = 128
 shuffle_train = False
-train_num_workers = 4
+train_num_workers = 2
 shuffle_test = False
-test_num_workers = 4
+test_num_workers = 2
 
 cycle_training_every = 50
 vae_train_proportion = 0.5

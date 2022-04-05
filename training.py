@@ -2,7 +2,7 @@ import torch
 from torch import optim
 from torch.utils.data import DataLoader
 import os
-from model import VAE, Optimisation
+from model import VAE, Discriminator, Optimisation
 from data_loader import Dataset
 from params import *
 import datetime
@@ -22,7 +22,9 @@ def main():
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=shuffle_test, num_workers=test_num_workers)
 
     vae = VAE(INPUT_SIZE, hidden_dims, latent_dims, gru_layers, fc_dropout, gru_dropout, bidirectional, fc_layers, device).to(device)
-    optimiser = Optimisation(vae, os.getcwd() + '/Model_Checkpoints/', optim.Adam(vae.parameters(), lr=learning_rate, weight_decay=weight_decay),
+    discriminator = Discriminator(INPUT_SIZE, hidden_dims, gru_layers, fc_dropout, gru_dropout, bidirectional, fc_layers, device).to(device)
+    optimiser = Optimisation(vae, discriminator, os.getcwd() + '/Model_Checkpoints/', optim.Adam(vae.parameters(), lr=learning_rate, weight_decay=weight_decay),
+                            optim.Adam(discriminator.parameters(), lr=disc_learning_rate, weight_decay=disc_weight_decay),
                             kl_beta, classifier_weight, GENRE_DICT, batch_size, vae_mse, device)
     
     print('No. of trainable model parameters: ' + str(sum(p.numel() for p in vae.parameters() if p.requires_grad)))
