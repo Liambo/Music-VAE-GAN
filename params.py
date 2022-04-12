@@ -24,6 +24,7 @@ test_num_workers = 2
 cycle_training_every = 50
 vae_train_proportion = 0.5
 vae_mse = True
+generator_loops = 2
 
 hidden_dims = 256
 latent_dims = 256
