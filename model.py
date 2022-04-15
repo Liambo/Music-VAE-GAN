@@ -1,6 +1,6 @@
 from statistics import mean
 import torch
-from torch import nn
+from torch import autograd, nn
 import numpy as np
 import datetime
 import time
@@ -11,7 +11,7 @@ from copy import deepcopy
 
 class VAE(nn.Module):
     def __init__(self, input_size, hidden_dim, latent_dim, gru_layers,
-                    fc_dropout, gru_dropout, bidirectional, fc_layers, device, n_genres=5):
+                    fc_dropout, gru_dropout, bidirectional, fc_layers, device, n_genres=4):
             super(VAE, self).__init__()
 
             #Define parameters
@@ -101,6 +101,7 @@ class VAE(nn.Module):
             self.fc_decoder.add_module('Linear_' + str(self.fc_layers-1),
                 nn.Linear(in_features=self.hidden_dim,
                 out_features=self.input_size))
+            self.fc_decoder.add_module('Sigmoid', nn.Sigmoid()) # Put outputs between 0 and 1 to stabilise training.
 
             for i in range(self.gru_layers-1):
                 self.fc_latent.append(deepcopy(self.fc_latent[0]))
@@ -202,8 +203,8 @@ class VAE(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, input_size, hidden_dim, gru_layers,
-                    fc_dropout, gru_dropout, bidirectional, fc_layers, device):
+    def __init__(self, input_size, hidden_dim, gru_layers, fc_dropout,
+                gru_dropout, bidirectional, fc_layers, critic, device):
             super(Discriminator, self).__init__()
 
             self.fc_dropout = fc_dropout
@@ -214,6 +215,7 @@ class Discriminator(nn.Module):
             self.fc_layers = fc_layers
             self.input_size = input_size
             self.hidden_dim = hidden_dim
+            self.critic = critic
 
             if bidirectional: # If bidirectional, hidden dim for producing latent space has to be twice as large due to concatenation of encoder outputs.
                 self.discriminator_hidden_dim = 2*gru_layers*hidden_dim
@@ -243,7 +245,8 @@ class Discriminator(nn.Module):
 
             self.fc_discriminator.add_module('Linear_' + str(self.fc_layers-1),
                 nn.Linear(in_features=self.discriminator_hidden_dim//2**(self.fc_layers-1), out_features=1))
-            self.fc_discriminator.add_module('Sigmoid', nn.Sigmoid())
+            if not self.critic:
+                self.fc_discriminator.add_module('Sigmoid', nn.Sigmoid())
 
     def forward(self, x):
         hidden_states = [torch.zeros((x.shape[0], self.hidden_dim), device=self.device) for i in range(self.gru_layers)] # Initialise hidden state as zeroes
@@ -265,7 +268,9 @@ class Discriminator(nn.Module):
 
 
 class Optimisation:
-    def __init__(self, model, discriminator, checkpoint_path, optimiser, disc_optimiser, beta, class_weight, genre_dict, batch_size, vae_mse, generator_loops, device, verbose=False):
+    def __init__(self, model, discriminator, checkpoint_path, optimiser, disc_optimiser,
+            beta, sigma, class_weight, genre_dict, batch_size, vae_mse, generator_loops,
+            critic, gp_weight, device, verbose=False):
         self.verbose = verbose
         self.device = device
         self.model = model
@@ -280,10 +285,16 @@ class Optimisation:
         self.mse = nn.MSELoss().to(self.device)
         self.bce = nn.BCELoss().to(self.device)
         self.beta = beta
+        self.sigma = sigma
+        self.gp_weight = gp_weight
+        self.critic = critic
+        self.logsigma = math.log(sigma)
         self.class_weight = class_weight
         self.batch_size = batch_size
         self.genre_dict = genre_dict
         self.n_genres = len(genre_dict)
+        self.vae_lr = self.optimiser.param_groups[0]['lr']
+        self.gan_lr = self.disc_optimiser.param_groups[0]['lr']
 
     def vae_loss_fn(self, x, x_hat, mu, logvar, genre, genre_pred):
         if self.vae_mse == True:
@@ -291,13 +302,29 @@ class Optimisation:
         else:
             loss = self.bce(x_hat, x)
         class_loss = self.bce(genre_pred, genre)
-        kl_div = (0.5 * (mu ** 2 + torch.exp(logvar) - logvar - 1).sum(axis=1)).mean()
+        kl_div = (0.5 * (mu ** 2 + torch.exp(logvar)/self.sigma - logvar + self.logsigma - 1).sum(axis=1)).mean()
         # KL Div loss, i.e. how similar is prior to posterior distribution. We sum loss over latent variables for each batch & timestep, then mean.
-        return loss + self.beta * kl_div + self.class_weight * class_loss
+        return loss, self.beta * kl_div, self.class_weight * class_loss
     
-    def gan_loss_fn(self, x_hat, x):
-        bce_loss = self.bce(x_hat, x)
-        return bce_loss
+    def compute_grad_pen(self, x, x_hat): # Compute gradient penalty for use in WGAN-GP loss function
+        eps = torch.rand(x.shape(0), 1, 1).to(self.device)
+        eps = eps.expand_as(x)
+        interpolation = eps * x + (1-eps) * x_hat
+
+        interp_logits = self.discriminator(interpolation)
+        grad_outputs = torch.ones_like(interp_logits)
+
+        gradients = autograd.grad(
+            outputs = interp_logits,
+            inputs = interpolation,
+            grad_outputs = grad_outputs,
+            create_graph = True,
+            retain_graph = True
+        )[0]
+
+        gradients = gradients.view(x.shape(0), -1)
+        grad_norm = gradients.norm(2, 1)
+        return torch.mean((grad_norm - 1) ** 2)
     
     def measure_qn(self, x): # Measure 'qualified notes', i.e. notes longer than 3 timesteps
         pointer_tensor = torch.zeros((x.shape[0], x.shape[2]), device=self.device) # Pointer tensor keeps track of length of currently on notes
@@ -337,57 +364,80 @@ class Optimisation:
         self.model.train()
         self.discriminator.train()
         self.disc_optimiser.zero_grad()
-        disc_loss = torch.tensor([0])
+        total_disc_loss = 0
         total_loss = 0
+        total_rec_loss = 0
+        total_class_loss = 0
+        total_kl_loss = 0
         if vae:
             x_hat, mu, logvar, genre_pred = self.model.vae_train(x)
-            loss = self.vae_loss_fn(x, x_hat, mu, logvar, genre_vec, genre_pred)
+            rec_loss, kl_loss, class_loss = self.vae_loss_fn(x, x_hat, mu, logvar, genre_vec, genre_pred)
+            total_rec_loss = rec_loss.item()
+            total_class_loss = class_loss.item()
+            total_kl_loss = kl_loss.item()
+            loss = rec_loss + kl_loss + class_loss
+            loss.backward()
+            self.optimiser.step()
+            total_loss = loss.item()
         else:
-            x_hat = self.model.generate(x, genre_vec)
-            fake_pred = self.discriminator(x_hat.detach())
-            fake_class = torch.ones_like(fake_pred)
-            real_class = torch.zeros_like(fake_pred)
-            real_pred = self.discriminator(x)
-            disc_loss = self.gan_loss_fn(torch.cat((fake_pred, real_pred)), torch.cat((fake_class, real_class)))
-            disc_loss.backward()
-            self.disc_optimiser.step()
-
-            fake_pred = self.discriminator(x_hat)
-            loss = self.gan_loss_fn(fake_pred, real_class)
-
-            for _ in range(self.generator_loops-1):
-                total_loss += loss.item()
+            if self.critic:
+                x_hat = self.model.generate(x, genre_vec)
+                fake_score = self.discriminator(x_hat)
+                loss = -fake_score.mean()
                 loss.backward()
                 self.optimiser.step()
-                self.optimiser.zero_grad()
+                total_loss = loss.item()
+
+                self.model.eval()
+
+                for _ in range(self.generator_loops):
+                    self.disc_optimiser.zero_grad()
+                    real_score = self.discriminator(x)
+                    fake_score = self.discriminator(x_hat)
+                    grad_penalty = self.gp_weight * self.compute_grad_pen(x, x_hat)
+                    loss_c = fake_score.mean() - real_score.mean()
+                    disc_loss = loss_c + grad_penalty
+                    disc_loss.backward()
+                    self.disc_optimiser.step()
+                    total_disc_loss += disc_loss.item()
+                total_disc_loss /= self.generator_loops
+
+            else:
                 x_hat = self.model.generate(x, genre_vec)
-                fake_pred = self.discriminator(x_hat)
-                loss = self.gan_loss_fn(fake_pred, real_class)
-        
-        total_loss += loss.item()
-        if not vae:
-            total_loss /= self.generator_loops
-        if self.verbose:
-            print('After forward pass', torch.cuda.memory_allocated(self.device))
-        loss.backward()
-        if self.verbose:
-            print('After backward pass', torch.cuda.memory_allocated(self.device))
-        self.optimiser.step()
-        if self.verbose:
-            print('After optimizer step', torch.cuda.memory_allocated(self.device))
+                fake_pred = self.discriminator(x_hat.detach())
+                fake_class = torch.ones_like(fake_pred)
+                real_class = torch.zeros_like(fake_pred)
+                real_pred = self.discriminator(x)
+                disc_loss = self.bce(torch.cat((fake_pred, real_pred)), torch.cat((fake_class, real_class)))
+                disc_loss.backward()
+                self.disc_optimiser.step()
+                total_disc_loss = disc_loss.item()
+
+                for _ in range(self.generator_loops):
+                    fake_pred = self.discriminator(x_hat)
+                    loss = self.bce(fake_pred, real_class)
+                    total_loss += loss.item()
+                    loss.backward()
+                    self.optimiser.step()
+                    self.optimiser.zero_grad()
+                    x_hat = self.model.generate(x, genre_vec)
+
+                total_loss /= self.generator_loops
+
         if qn:
             qn_num, uqn_num = self.measure_qn(x_hat)
             if qn_num+uqn_num != 0:
                 qn = qn_num/(qn_num+uqn_num)
             else:
                 qn = 0
-        return total_loss, disc_loss.item(), qn, upc
+        return total_loss, total_disc_loss, qn, upc, total_rec_loss, total_class_loss, total_kl_loss
     
     def test_step(self, x, genre_vec):
         self.model.eval()
         x_hat, mu, logvar, genre_pred = self.model(x)
-        loss = self.vae_loss_fn(x, x_hat, mu, logvar, genre_vec, genre_pred)
-        return loss.item(), x_hat
+        rec_loss, kl_loss, class_loss = self.vae_loss_fn(x, x_hat, mu, logvar, genre_vec, genre_pred)
+        loss = rec_loss + kl_loss + class_loss
+        return loss.item(), x_hat, rec_loss.item(), class_loss.item()
     
     def train(self, train_loader, test_loader, writer, n_epochs, eval_every, measure_every, cycle_every, vae_train_proportion):
         genre_vec_dict = {} # Dictionary to hold genre vectors for different genres
@@ -395,6 +445,9 @@ class Optimisation:
             genre_vec_dict[genre] = torch.cat((torch.zeros(self.genre_dict[genre]), torch.ones(1), torch.zeros(self.n_genres-(1+self.genre_dict[genre]))))
             # Constructs genre vector for latent space now, rather than creating a new one for every batch.
         running_loss = 0.0
+        running_rec_loss = 0.0
+        running_class_loss = 0.0
+        running_kl_loss = 0.0
         running_disc = 0
         running_qn = 0.0
         tm1 = time.time()
@@ -402,8 +455,15 @@ class Optimisation:
         ld = 0
         trn = 0
         i=0
-        vae = int(math.ceil(vae_train_proportion)) # Always start with VAE trainng, unless if train porportion is 0.
         for epoch in range(1, n_epochs+1):
+            if epoch % cycle_every >= cycle_every * vae_train_proportion: # If doing GAN training, need to change optmimiser to GAN lr
+                vae = False
+                for g in self.optimiser.param_groups:
+                        g['lr'] = self.gan_lr
+            else:
+                vae = True
+                for g in self.optimiser.param_groups:
+                        g['lr'] = self.vae_lr
             for batch, genre in train_loader:
                 if self.verbose:
                     print('Iteration', i)
@@ -414,8 +474,11 @@ class Optimisation:
                 if self.verbose:
                     print('After batch to device', torch.cuda.memory_allocated(self.device))
                 genre_vec = torch.stack([genre_vec_dict[gen] for gen in genre]).to(self.device)
-                loss, disc_loss, qn, _ = self.train_step(input, genre_vec, vae=vae)
+                loss, disc_loss, qn, _, rec_loss, class_loss, kl_loss = self.train_step(input, genre_vec, vae=vae)
                 running_loss += loss
+                running_rec_loss += rec_loss
+                running_class_loss += class_loss
+                running_kl_loss += kl_loss
                 running_disc += disc_loss
                 running_qn += qn
                 tm2 = tm1
@@ -427,8 +490,14 @@ class Optimisation:
                                     running_loss / measure_every,
                                     running_disc / measure_every,
                                     running_qn / measure_every,
+                                    running_rec_loss / measure_every,
+                                    running_class_loss / measure_every,
+                                    running_kl_loss / measure_every,
                                     ld, trn])
                     running_loss = 0.0
+                    running_rec_loss = 0.0
+                    running_class_loss = 0.0
+                    running_kl_loss = 0.0
                     running_disc = 0.0
                     running_qn = 0.0
                     ld = 0
@@ -436,24 +505,26 @@ class Optimisation:
             if epoch == 1 or epoch % eval_every == 0:
                 print('done epoch {} of {}'.format(epoch, n_epochs))
                 eval_losses = []
+                eval_classes = []
+                eval_recs = []
                 first = True
                 for batch, genre in test_loader:
                     with torch.no_grad():
                         input = batch.to(self.device)
                         genre_vec = torch.stack([genre_vec_dict[gen] for gen in genre]).to(self.device)
-                        loss, out = self.test_step(input, genre_vec)
+                        loss, out, rec_loss, class_loss = self.test_step(input, genre_vec)
                         if first:
                             out = convert_batch(out, threshold=0.5)
                             proll = convert_pianoroll(out)
                             proll.write('./Outputs/' + str(datetime.datetime.now()) + '.mid')
                             first = False
                         eval_losses.append(loss)
-                print('mean loss for epoch ' + str(epoch) + ': ' + str(mean(eval_losses)))
-                torch.save({'epoch': epoch, 'model_state_dict': self.model.state_dict(), 'optimiser_state_dict': self.optimiser.state_dict(), 'loss': mean(eval_losses)}, self.checkpoint_path + str(datetime.datetime.now()) + '.pt')
-            if epoch % cycle_every >= cycle_every * vae_train_proportion:
-                vae = False
-            else:
-                vae = True
+                        eval_classes.append(class_loss)
+                        eval_recs.append(rec_loss)
+                print('Mean loss for epoch ' + str(epoch) + ': ' + str(mean(eval_losses)))
+                print('Reconstruction Loss: ' + str(mean(eval_recs)))
+                print('Classification Loss: ' + str(mean(eval_classes)))
+                #torch.save({'epoch': epoch, 'model_state_dict': self.model.state_dict(), 'optimiser_state_dict': self.optimiser.state_dict(), 'loss': mean(eval_losses)}, self.checkpoint_path + str(datetime.datetime.now()) + '.pt')
 
     def lr_range_test(self, train_loader, writer, vae, start_lr=-5.0, stop_lr=0.0, lr_step=0.5, measure_every=10, change_every=500):
         genre_vec_dict = {} # Dictionary to hold genre vectors for different genres
