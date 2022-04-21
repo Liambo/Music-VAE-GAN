@@ -1,7 +1,7 @@
 # Constants & data structures - DO NOT EDIT
-GENRE_DICT = {'Jazz': 0, 'Country': 1, 'Pop': 2, 'Rock': 3, 'Blues': 4}
-N_SAMPLES = 32411
-INPUT_SIZE = 392
+GENRE_DICT = {'Jazz': 0, 'Country': 1, 'Pop': 2, 'Rock': 3}
+N_SAMPLES = 78250
+INPUT_SIZE = 402
 
 # Parameters - Can edit these
 learning_rate = 10**-2.875
@@ -9,7 +9,7 @@ disc_learning_rate = 10**-2.875
 disc_weight_decay = 0.000001
 weight_decay = 0.000001
 kl_beta = 1.0
-classifier_weight = 1.0
+classifier_weight = 0.03
 n_epochs = 50
 eval_every = 2
 measure_every = 5
