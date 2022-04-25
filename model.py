@@ -123,7 +123,7 @@ class VAE(nn.Module):
     def forward(self, x): # Tries to classify & reconstruct input in same genre.
         hidden_states = [torch.zeros((x.shape[0], self.hidden_dim), device=self.device) for i in range(self.gru_layers)] # Initialise hidden state as zeroes
         for i in range(x.shape[1]): # For i in range(len of piece)
-            hidden_states[0] = self.encoder[0](self.gru_dropout(x[:, i].squeeze()), hidden_states[0]) # Update hidden state for every timestep
+            hidden_states[0] = self.encoder[0](self.gru_dropout(x[:, i].squeeze(1)), hidden_states[0]) # Update hidden state for every timestep
             for j in range(1, self.gru_layers): # Passing hidden states through all GRU layers
                 hidden_states[j] = self.encoder[j](self.gru_dropout(hidden_states[j-1]), hidden_states[j])
         hidden = hidden_states[-1]
@@ -131,7 +131,7 @@ class VAE(nn.Module):
         if self.bidirectional:
             back_hidden = [torch.zeros((x.shape[0], self.hidden_dim), device=self.device) for i in range(self.gru_layers)]
             for i in range(x.shape[1]-1, -1, -1):
-                back_hidden[0] = self.back_encoder[0](self.gru_dropout(x[:, i].squeeze()), back_hidden[0])
+                back_hidden[0] = self.back_encoder[0](self.gru_dropout(x[:, i].squeeze(1)), back_hidden[0])
                 for j in range(1, self.gru_layers):
                     back_hidden[j] = self.back_encoder[j](self.gru_dropout(back_hidden[j-1]), back_hidden[j])
             hidden = torch.cat((hidden, back_hidden[-1]), dim=1)
@@ -142,7 +142,7 @@ class VAE(nn.Module):
         genre_pred = self.genre_classifier(z[:, :self.n_genres]) # Applies softmax to first n_genres layers of latent space to get genre predictions
         hidden_states = [self.fc_latent[i](z) for i in range(self.gru_layers)] # Sample from latent space to get initial hidden state for decoder
         
-        output_note = x[:, :1, :].squeeze() # Start from first note of input (so not starting from empty note)
+        output_note = x[:, :1, :].squeeze(1) # Start from first note of input (so not starting from empty note)
         output = x[:, :1, :]
         for i in range(x.shape[1]-1):
             hidden_states[0] = self.decoder[0](self.gru_dropout(output_note), hidden_states[0])
@@ -152,10 +152,10 @@ class VAE(nn.Module):
             output = torch.cat((output, torch.unsqueeze(output_note, 1)), 1)
         return output, mu, logvar, genre_pred
     
-    def vae_train(self, x):
+    def transfer(self, x, origin, target): # Transfer input from origin genre to target genre
         hidden_states = [torch.zeros((x.shape[0], self.hidden_dim), device=self.device) for i in range(self.gru_layers)] # Initialise hidden state as zeroes
         for i in range(x.shape[1]): # For i in range(len of piece)
-            hidden_states[0] = self.encoder[0](self.gru_dropout(x[:, i].squeeze()), hidden_states[0]) # Update hidden state for every timestep
+            hidden_states[0] = self.encoder[0](self.gru_dropout(x[:, i, :].squeeze(1)), hidden_states[0]) # Update hidden state for every timestep
             for j in range(1, self.gru_layers): # Passing hidden states through all GRU layers
                 hidden_states[j] = self.encoder[j](self.gru_dropout(hidden_states[j-1]), hidden_states[j])
         hidden = hidden_states[-1]
@@ -163,7 +163,61 @@ class VAE(nn.Module):
         if self.bidirectional:
             back_hidden = [torch.zeros((x.shape[0], self.hidden_dim), device=self.device) for i in range(self.gru_layers)]
             for i in range(x.shape[1]-1, -1, -1):
-                back_hidden[0] = self.back_encoder[0](self.gru_dropout(x[:, i].squeeze()), back_hidden[0])
+                back_hidden[0] = self.back_encoder[0](self.gru_dropout(x[:, i].squeeze(1)), back_hidden[0])
+                for j in range(1, self.gru_layers):
+                    back_hidden[j] = self.back_encoder[j](self.gru_dropout(back_hidden[j-1]), back_hidden[j])
+            hidden = torch.cat((hidden, back_hidden[-1]), dim=1)
+
+        mu = self.fc_mu(hidden) # Get latent mean from final hidden state
+        logvar = self.fc_logvar(hidden) # Get latent logvar from final hidden state
+        z = self.reparameterize(mu, logvar) # Reparamaterize & sample from latent space
+        z[:, [origin, target]] = z[:, [target, origin]] # Swap dimensions of origin & target genres.
+        hidden_states = [self.fc_latent[i](z) for i in range(self.gru_layers)] # Sample from latent space to get initial hidden state for decoder
+        
+        output_note = x[:, :1, :].squeeze(1) # Start from first note of input (so not starting from empty note)
+        output = x[:, :1, :]
+        for i in range(x.shape[1]-1):
+            hidden_states[0] = self.decoder[0](self.gru_dropout(output_note), hidden_states[0])
+            for j in range(1, self.gru_layers):
+                hidden_states[j] = self.decoder[j](self.gru_dropout(hidden_states[j-1]), hidden_states[j])
+            output_note = self.fc_decoder(hidden_states[self.gru_layers-1])
+            output = torch.cat((output, torch.unsqueeze(output_note, 1)), 1)
+        return output
+    
+    def classify(self, x):
+        hidden_states = [torch.zeros((x.shape[0], self.hidden_dim), device=self.device) for i in range(self.gru_layers)] # Initialise hidden state as zeroes
+        for i in range(x.shape[1]): # For i in range(len of piece)
+            hidden_states[0] = self.encoder[0](self.gru_dropout(x[:, i].squeeze(1)), hidden_states[0]) # Update hidden state for every timestep
+            for j in range(1, self.gru_layers): # Passing hidden states through all GRU layers
+                hidden_states[j] = self.encoder[j](self.gru_dropout(hidden_states[j-1]), hidden_states[j])
+        hidden = hidden_states[-1]
+
+        if self.bidirectional:
+            back_hidden = [torch.zeros((x.shape[0], self.hidden_dim), device=self.device) for i in range(self.gru_layers)]
+            for i in range(x.shape[1]-1, -1, -1):
+                back_hidden[0] = self.back_encoder[0](self.gru_dropout(x[:, i].squeeze(1)), back_hidden[0])
+                for j in range(1, self.gru_layers):
+                    back_hidden[j] = self.back_encoder[j](self.gru_dropout(back_hidden[j-1]), back_hidden[j])
+            hidden = torch.cat((hidden, back_hidden[-1]), dim=1)
+
+        mu = self.fc_mu(hidden) # Get latent mean from final hidden state
+        logvar = self.fc_logvar(hidden) # Get latent logvar from final hidden state
+        z = self.reparameterize(mu, logvar) # Reparamaterize & sample from latent space
+        genre_pred = self.genre_classifier(z[:, :self.n_genres]) # Applies softmax to first n_genres layers of latent space to get genre predictions
+        return genre_pred.detach()
+
+    def vae_train(self, x):
+        hidden_states = [torch.zeros((x.shape[0], self.hidden_dim), device=self.device) for i in range(self.gru_layers)] # Initialise hidden state as zeroes
+        for i in range(x.shape[1]): # For i in range(len of piece)
+            hidden_states[0] = self.encoder[0](self.gru_dropout(x[:, i].squeeze(1)), hidden_states[0]) # Update hidden state for every timestep
+            for j in range(1, self.gru_layers): # Passing hidden states through all GRU layers
+                hidden_states[j] = self.encoder[j](self.gru_dropout(hidden_states[j-1]), hidden_states[j])
+        hidden = hidden_states[-1]
+
+        if self.bidirectional:
+            back_hidden = [torch.zeros((x.shape[0], self.hidden_dim), device=self.device) for i in range(self.gru_layers)]
+            for i in range(x.shape[1]-1, -1, -1):
+                back_hidden[0] = self.back_encoder[0](self.gru_dropout(x[:, i].squeeze(1)), back_hidden[0])
                 for j in range(1, self.gru_layers):
                     back_hidden[j] = self.back_encoder[j](self.gru_dropout(back_hidden[j-1]), back_hidden[j])
             hidden = torch.cat((hidden, back_hidden[-1]), dim=1)
@@ -183,12 +237,17 @@ class VAE(nn.Module):
             output = torch.cat((output, torch.unsqueeze(output_note, 1)), 1)
         return output, mu, logvar, genre_pred
     
-    def sample(self):
-        z = torch.randn((128, self.latent_dim), device=self.device)
+    def sample(self, genre):
+        z = torch.randn((1, self.latent_dim), device=self.device)
+        for i in range(self.n_genres):
+            if i == genre:
+                z[0, i] = 1
+            else:
+                z[0, i] = 0
         hidden_states = [self.fc_latent[i](z) for i in range(self.gru_layers)] # Sample from latent space to get initial hidden state for decoder
-        output_note = torch.cat((torch.ones(128, 1), torch.zeros(128, self.input_size-1)), dim=1) # Start from first note of input (so not starting from empty note)
+        output_note = torch.cat((torch.ones(1, 1), torch.zeros(1, self.input_size-1)), dim=1) # Start from first note of input (so not starting from empty note)
         output = torch.unsqueeze(output_note, 1)
-        for i in range(96):
+        for i in range(384):
             hidden_states[0] = self.decoder[0](self.gru_dropout(output_note), hidden_states[0])
             for j in range(1, self.gru_layers):
                 hidden_states[j] = self.decoder[j](self.gru_dropout(hidden_states[j-1]), hidden_states[j])
@@ -199,7 +258,7 @@ class VAE(nn.Module):
     def generate(self, x, genre_vec): # Generate a piece in style of genre in genre_vec
         z = torch.cat((genre_vec, torch.randn((genre_vec.shape[0], self.latent_dim-self.n_genres), device=self.device)), dim=1)
         hidden_states = [self.fc_latent[i](z) for i in range(self.gru_layers)] # Sample from latent space to get initial hidden state for decoder
-        output_note = x[:, :1, :].squeeze() # Start from first note of input (so not starting from empty note)
+        output_note = x[:, :1, :].squeeze(1) # Start from first note of input (so not starting from empty note)
         output = x[:, :1, :]
         for i in range(x.shape[1]-1):
             hidden_states[0] = self.decoder[0](self.gru_dropout(output_note), hidden_states[0])
@@ -259,14 +318,14 @@ class Discriminator(nn.Module):
     def forward(self, x):
         hidden_states = [torch.zeros((x.shape[0], self.hidden_dim), device=self.device) for i in range(self.gru_layers)] # Initialise hidden state as zeroes
         for i in range(x.shape[1]): # For i in range(len of piece)
-            hidden_states[0] = self.discriminator[0](self.gru_dropout(x[:, i, :].squeeze()), hidden_states[0]) # Update hidden state for every timestep
+            hidden_states[0] = self.discriminator[0](self.gru_dropout(x[:, i, :].squeeze(1)), hidden_states[0]) # Update hidden state for every timestep
             for j in range(1, self.gru_layers):
                 hidden_states[j] = self.discriminator[j](self.gru_dropout(hidden_states[j-1]), hidden_states[j])
         hidden = torch.cat(hidden_states, dim=1)
         if self.bidirectional:
             back_hidden = [torch.zeros((x.shape[0], self.hidden_dim), device=self.device) for i in range(self.gru_layers)]
             for i in range(x.shape[1]-1, -1, -1):
-                back_hidden[0] = self.back_discriminator[0](self.gru_dropout(x[:, i, :].squeeze()), back_hidden[0])
+                back_hidden[0] = self.back_discriminator[0](self.gru_dropout(x[:, i, :].squeeze(1)), back_hidden[0])
                 for j in range(1, self.gru_layers):
                     back_hidden[j] = self.back_discriminator[j](self.gru_dropout(back_hidden[j-1]), back_hidden[j])
             hidden = torch.cat((hidden, torch.cat(back_hidden, dim=1)), dim=1)
@@ -340,7 +399,7 @@ class Optimisation:
         chords = 0
         n_notes = (x.shape[2]-2)//5
         for i in range(x.shape[1]):
-            current_slice = (x[:, i, 2:].squeeze() > 0.5)
+            current_slice = (x[:, i, 2:].squeeze(1) > 0.5)
             changing_notes = (current_slice != pointer_tensor)
             starting_notes = (changing_notes * current_slice)
             for j in range(5):
@@ -360,7 +419,7 @@ class Optimisation:
         uqn_num = 0 # unqualified notes
         for i in range(x.shape[1]+1):
             if i < x.shape[1]:
-                current_slice = x[:, i, :].squeeze()
+                current_slice = x[:, i, :].squeeze(1)
             else:
                 current_slice = torch.zeros_like(current_slice)
             pointer_tensor += (current_slice > 0.5)
@@ -389,7 +448,7 @@ class Optimisation:
         n_notes = (x.shape[2]-2)//5
         zeros = torch.zeros((x.shape[0], 12 - n_notes % 12), device=self.device)
         for i in range(x.shape[1]):
-            current_slice = x[:, i, :].squeeze() > 0.5
+            current_slice = x[:, i, :].squeeze(1) > 0.5
             for j in range(n_notes // 12):
                 pc_tracker += torch.cat((current_slice[:, j*12:(j+1)*12],
                 current_slice[:, n_notes + j*12:n_notes+(j+1)*12],
@@ -483,11 +542,10 @@ class Optimisation:
         running_disc_loss = 0.0
         running_gen_loss = 0.0
         running_gp_loss = 0.0
-        tm1 = time.time()
-        tm2 = time.time()
         i=0
         j=0
         for epoch in range(1, n_epochs+1):
+            seqlength = min(2**epoch + 1, 384)
             print('epoch', epoch)
             if epoch % cycle_every >= cycle_every * vae_train_proportion: # If doing GAN training, need to change optmimiser to GAN lr
                 vae = False
@@ -497,44 +555,32 @@ class Optimisation:
                 vae = True
                 for g in self.optimiser.param_groups:
                     g['lr'] = self.vae_lr
-            tm1 = time.time()
-            print('params updated', tm1 - tm2)
-            tm2 = tm1
             for batch, genre in train_loader:
-                tm1 = time.time()
-                print('iteration', i, tm1 - tm2)
-                tm2 = tm1
                 input = batch.to(self.device)
                 genre_vec = torch.stack([genre_vec_dict[gen] for gen in genre]).to(self.device)
-                tm1 = time.time()
-                print('prepared inputs', tm1 - tm2)
-                tm2 = tm1
                 if vae:
-                    loss, rec_loss, class_loss, kl_loss = self.vae_train_step(input, genre_vec)
+                    loss, rec_loss, class_loss, kl_loss = self.vae_train_step(input[:, :seqlength, :], genre_vec)
                     running_loss += loss
                     running_rec_loss += rec_loss
                     running_class_loss += class_loss
                     running_kl_loss += kl_loss
                 elif i % (self.generator_loops+1) == 0:
                     if self.critic:
-                        disc_loss, gp_loss = self.critic_train_step(input, genre_vec)
+                        disc_loss, gp_loss = self.critic_train_step(input[:, :seqlength, :], genre_vec)
                         running_disc_loss += disc_loss
                         running_gp_loss += gp_loss
                         j += 1
                     else:
-                        loss = self.gan_generator_train_step(input, genre_vec)
+                        loss = self.gan_generator_train_step(input[:, :seqlength, :], genre_vec)
                         running_gen_loss += loss
                 else:
                     if self.critic:
-                        loss = self.wgan_generator_train_step(input, genre_vec)
+                        loss = self.wgan_generator_train_step(input[:, :seqlength, :], genre_vec)
                         running_gen_loss += loss
                     else:
-                        loss = self.discriminator_train_step(input, genre_vec)
+                        loss = self.discriminator_train_step(input[:, :seqlength, :], genre_vec)
                         running_disc_loss += loss
                         j += 1
-                tm1 = time.time()
-                print('completed train loop', tm1 - tm2)
-                tm2 = tm1
                 i += 1
                 if i % measure_every == 0:
                     writer.writerow([i,
@@ -588,17 +634,59 @@ class Optimisation:
         for g in self.optimiser.param_groups:
             g['lr'] = lr
         i = 0
+        j=0
         running_loss = 0.0
+        running_rec_loss = 0.0
+        running_class_loss = 0.0
+        running_kl_loss = 0.0
+        running_disc_loss = 0.0
+        running_gen_loss = 0.0
+        running_gp_loss = 0.0
         while True:
             for batch, genre in train_loader:
                 input = batch.to(self.device)
                 genre_vec = torch.stack([genre_vec_dict[gen] for gen in genre]).to(self.device)
-                loss, _, _, _ = self.train_step(input, genre_vec, vae)
-                running_loss += loss
+                if vae:
+                    loss, rec_loss, class_loss, kl_loss = self.vae_train_step(input, genre_vec)
+                    running_loss += loss
+                    running_rec_loss += rec_loss
+                    running_class_loss += class_loss
+                    running_kl_loss += kl_loss
+                elif i % (self.generator_loops+1) == 0:
+                    if self.critic:
+                        disc_loss, gp_loss = self.critic_train_step(input, genre_vec)
+                        running_disc_loss += disc_loss
+                        running_gp_loss += gp_loss
+                        j += 1
+                    else:
+                        loss = self.gan_generator_train_step(input, genre_vec)
+                        running_gen_loss += loss
+                else:
+                    if self.critic:
+                        loss = self.wgan_generator_train_step(input, genre_vec)
+                        running_gen_loss += loss
+                    else:
+                        loss = self.discriminator_train_step(input, genre_vec)
+                        running_disc_loss += loss
+                        j += 1
                 i += 1
                 if i % measure_every == 0:
-                    writer.writerow([i, lr, running_loss / measure_every])
+                    writer.writerow([i, lr,
+                                    running_loss / measure_every,
+                                    running_rec_loss / measure_every,
+                                    running_class_loss / measure_every,
+                                    running_kl_loss / measure_every,
+                                    running_disc_loss / j if j > 0 else 0.0,
+                                    running_gen_loss / measure_every-j,
+                                    running_gp_loss / j if j > 0 else 0.0])
+                    j = 0
                     running_loss = 0.0
+                    running_rec_loss = 0.0
+                    running_class_loss = 0.0
+                    running_kl_loss = 0.0
+                    running_disc_loss = 0.0
+                    running_gen_loss = 0.0
+                    running_gp_loss = 0.0
                 if i % change_every == 0:
                     print('done test for lr ' + str(lr))
                     if start_lr >= stop_lr:
